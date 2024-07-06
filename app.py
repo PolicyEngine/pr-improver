@@ -1,9 +1,6 @@
 import streamlit as st
 import requests
 import anthropic
-import pyperclip
-from custom_components import copy_button
-
 import tiktoken
 
 client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
@@ -89,26 +86,52 @@ def estimate_cost(input_tokens, output_tokens):
     return input_cost + output_cost
 
 
+def generate_prompt(diff, guidelines, additional_info):
+    return f"""{anthropic.HUMAN_PROMPT} You are an AI assistant providing specific suggestions for code improvements. 
+    Analyze this code diff:
+    {diff}
+
+    Consider these contributor guidelines:
+    {guidelines}
+
+    Additional context and information:
+    {additional_info}
+
+    Please provide 5-7 specific, actionable suggestions to improve this PR. Focus on:
+    1. Clearer Python variable names (especially for non-native English speakers)
+    2. More descriptive comments
+    3. Improved code structure and readability
+    4. Better test coverage or edge case handling
+
+    For each suggestion:
+    - Specify the file and line number(s) where the change should be made
+    - Provide the exact code snippet to be changed
+    - Explain why the change improves the code
+
+    Do not comment on formatting or test coverage checks, which CI/CD will handle.
+
+    {anthropic.AI_PROMPT}"""
+
+
 def main():
-    st.title("PolicyEngine GitHub PR Reviewer")
+    st.title("GitHub PR Reviewer")
 
     # Initialize session state
     if "suggestions" not in st.session_state:
         st.session_state.suggestions = ""
     if "prompt" not in st.session_state:
         st.session_state.prompt = ""
+    if "estimated_cost" not in st.session_state:
+        st.session_state.estimated_cost = 0
 
-    pr_url = st.text_input("Enter the PolicyEngine GitHub Pull Request URL")
+    pr_url = st.text_input("Enter the GitHub Pull Request URL")
     additional_info = st.text_area(
         "Enter additional information (e.g., relevant laws, tax forms, other feedback)",
         height=150,
+        key="additional_info",
     )
 
-    if pr_url and "github.com/policyengine" not in pr_url.lower():
-        st.error("This tool only works for PolicyEngine GitHub repositories.")
-        return
-
-    # Estimate cost before clicking the button
+    # Generate prompt and estimate cost in real-time
     if pr_url:
         github_token = st.secrets["GITHUB_TOKEN"]
         repo_info = pr_url.split("github.com/")[1].split("/pull/")
@@ -120,60 +143,58 @@ def main():
         guidelines = get_contributor_guidelines(owner, repo_name, github_token)
 
         if diff and guidelines:
-            estimated_input = diff + guidelines + additional_info
-            estimated_input_tokens = estimate_token_count(estimated_input)
-            estimated_output_tokens = 1500  # Max tokens set in the API call
-            estimated_cost = estimate_cost(
+            prompt = generate_prompt(diff, guidelines, additional_info)
+            st.session_state.prompt = prompt
+
+            estimated_input_tokens = estimate_token_count(prompt)
+            estimated_output_tokens = 1_000  # Max tokens set in the API call
+            st.session_state.estimated_cost = estimate_cost(
                 estimated_input_tokens, estimated_output_tokens
             )
 
-            st.info(f"Estimated cost for this analysis: ${estimated_cost:.4f}")
+            with st.expander("View Generated Prompt"):
+                st.code(prompt, language="markdown")
 
-    if st.button("Analyze PR"):
-        if pr_url:
-            with st.spinner("Fetching PR details and analyzing..."):
-                diff = get_github_diff(
-                    owner, repo_name, pull_number, github_token
-                )
-                guidelines = get_contributor_guidelines(
-                    owner, repo_name, github_token
+    # Update button text with estimated cost
+    button_text = "Analyze PR"
+    if st.session_state.estimated_cost > 0:
+        button_text += (
+            f" (costs up to {st.session_state.estimated_cost*100:.1f} cents)"
+        )
+
+    if st.button(button_text):
+        if pr_url and "github.com/policyengine" in pr_url.lower():
+            with st.spinner("Analyzing PR..."):
+                suggestions, _ = get_claude_suggestions(
+                    diff, guidelines, additional_info
                 )
 
-                if diff and guidelines:
-                    suggestions, prompt = get_claude_suggestions(
-                        diff, guidelines, additional_info
+                if suggestions:
+                    st.session_state.suggestions = suggestions
+
+                    st.subheader("Improvement Suggestions:")
+                    st.markdown(suggestions)
+
+                    with st.expander("View Copyable Suggestions"):
+                        st.code(suggestions, language="markdown")
+
+                    # Calculate and display actual token count and cost
+                    input_tokens = estimate_token_count(
+                        st.session_state.prompt
                     )
+                    output_tokens = estimate_token_count(suggestions)
+                    actual_cost = estimate_cost(input_tokens, output_tokens)
 
-                    if suggestions:
-                        st.session_state.suggestions = suggestions
-                        st.session_state.prompt = prompt
-
-                        st.subheader("Improvement Suggestions:")
-                        st.markdown(suggestions)
-                        st.text_area(
-                            "Suggestions (copy from here)",
-                            suggestions,
-                            height=300,
-                        )
-
-                        with st.expander("View Full Prompt"):
-                            st.text_area("Full Prompt", prompt, height=300)
-
-                        # Calculate and display actual token count and cost
-                        input_tokens = estimate_token_count(prompt)
-                        output_tokens = estimate_token_count(suggestions)
-                        actual_cost = estimate_cost(
-                            input_tokens, output_tokens
-                        )
-
-                        st.info(
-                            f"Actual token count: {input_tokens} (input), {output_tokens} (output)"
-                        )
-                        st.info(f"Actual cost: ${actual_cost:.4f}")
-                    else:
-                        st.error("Failed to generate suggestions.")
+                    st.info(
+                        f"This analysis cost {actual_cost*100:.1f} cents "
+                        f"({input_tokens:,} input tokens and {output_tokens:,} output tokens)"
+                    )
+                else:
+                    st.error("Failed to generate suggestions.")
         else:
-            st.error("Please enter a valid PolicyEngine GitHub PR URL.")
+            st.error(
+                "This tool only analyzes PolicyEngine GitHub repositories."
+            )
 
     st.sidebar.markdown("### About")
     st.sidebar.info(

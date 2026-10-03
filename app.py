@@ -19,6 +19,7 @@ def get_claude_suggestions(diff, guidelines, additional_info):
         response = client.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=MAX_TOKENS,
+            thinking={"type": "adaptive"},
             output_config={"effort": "low"},
             messages=[{"role": "user", "content": prompt}],
         )
@@ -151,7 +152,7 @@ def main():
     button_text = "Analyze PR"
     if st.session_state.estimated_cost > 0:
         button_text += (
-            f" (costs up to {st.session_state.estimated_cost*100:.1f} cents)"
+            f" (estimated cost: {st.session_state.estimated_cost*100:.1f} cents)"
         )
 
     if st.button(button_text):

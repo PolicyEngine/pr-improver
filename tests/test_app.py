@@ -67,13 +67,14 @@ def test_request_is_valid_for_claude_sonnet_5_5(monkeypatch):
 
     (body,) = sent_bodies
     assert body["model"] == "claude-sonnet-5-5"
+    assert body["thinking"] == {"type": "adaptive"}
     assert body["output_config"] == {"effort": "low"}
     # Thinking counts toward max_tokens, so leave room beyond the reply.
     assert body["max_tokens"] >= 16_000
     # Claude Sonnet 5.5 rejects non-default sampling parameters and
     # disabled thinking, and the API rejects assistant prefill.
     assert not {
-        "temperature", "top_p", "top_k", "thinking", "tool_choice"
+        "temperature", "top_p", "top_k", "tool_choice"
     } & body.keys()
     assert [m["role"] for m in body["messages"]] == ["user"]
     # The prompt sent is the prompt shown in "View Generated Prompt".
@@ -175,6 +176,7 @@ def test_ui_displays_billed_usage_including_hidden_thinking(monkeypatch):
     )
 
     ui.markdown.assert_called_once_with(suggestions)
+    ui.button.assert_called_once_with("Analyze PR (estimated cost: 16.0 cents)")
     ui.info.assert_called_once_with(
         "This analysis cost 0.8 cents "
         "(1,234 input tokens and 567 output tokens)"
@@ -256,8 +258,8 @@ def test_cost_is_additive(input_a, output_a, input_b, output_b):
 @settings(deadline=None)
 @given(TOKENS, st.integers(min_value=0, max_value=app.MAX_TOKENS))
 def test_max_tokens_estimate_bounds_billed_output(input_tokens, output_tokens):
-    # The API bills at most max_tokens output tokens, so the "costs up to"
-    # estimate bounds the output cost of any completed request.
+    # For a fixed input count, the full output budget bounds output cost;
+    # the app's approximate input count makes its total only an estimate.
     assert app.estimate_cost(input_tokens, output_tokens) <= app.estimate_cost(
         input_tokens, app.MAX_TOKENS
     )

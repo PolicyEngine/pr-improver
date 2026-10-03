@@ -1,4 +1,4 @@
-anthropic
+anthropic>=0.77.0
 pyperclip
 streamlit
 tiktoken

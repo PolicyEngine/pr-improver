@@ -4,45 +4,40 @@ import anthropic
 import tiktoken
 
 client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
-CLAUDE_MODEL = "claude-3-5-sonnet-20240620"
+CLAUDE_MODEL = "claude-sonnet-5-5"
+# Thinking tokens count toward max_tokens and are billed as output tokens.
+MAX_TOKENS = 16_000
+# Claude Sonnet 5.5 prices in USD per million tokens.
+INPUT_PRICE_PER_MILLION_TOKENS = 2
+OUTPUT_PRICE_PER_MILLION_TOKENS = 10
 
 
 def get_claude_suggestions(diff, guidelines, additional_info):
-    prompt = f"""{anthropic.HUMAN_PROMPT} You are an AI assistant providing specific suggestions for code improvements. 
-    Analyze this code diff:
-    {diff}
-
-    Consider these contributor guidelines:
-    {guidelines}
-
-    Additional context and information:
-    {additional_info}
-
-    Please provide 5-7 specific, actionable suggestions to improve this PR. Focus on:
-    1. Clearer Python variable names (especially for non-native English speakers)
-    2. More descriptive comments
-    3. Improved code structure and readability
-    4. Better test coverage or edge case handling
-
-    For each suggestion:
-    - Specify the file and line number(s) where the change should be made
-    - Provide the exact code snippet to be changed
-    - Explain why the change improves the code
-
-    Do not comment on formatting or test coverage checks, which CI/CD will handle.
-
-    {anthropic.AI_PROMPT}"""
+    prompt = generate_prompt(diff, guidelines, additional_info)
 
     try:
         response = client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=1_000,
-            temperature=0,
+            max_tokens=MAX_TOKENS,
+            thinking={"type": "adaptive"},
+            output_config={"effort": "low"},
             messages=[{"role": "user", "content": prompt}],
         )
-        return response.content[0].text, prompt
     except Exception as e:
-        return f"Failed to get suggestions: {str(e)}", prompt
+        return f"Failed to get suggestions: {str(e)}", prompt, None
+
+    if response.stop_reason == "refusal":
+        return (
+            "Failed to get suggestions: Claude declined this request.",
+            prompt,
+            None,
+        )
+
+    # Responses can include thinking blocks, so read only the text blocks.
+    suggestions = "".join(
+        block.text for block in response.content if block.type == "text"
+    )
+    return suggestions, prompt, response.usage
 
 
 def get_github_diff(owner, repo, pull_number, token):
@@ -81,13 +76,13 @@ def estimate_token_count(text):
 
 
 def estimate_cost(input_tokens, output_tokens):
-    input_cost = (input_tokens / 1_000_000) * 3
-    output_cost = (output_tokens / 1_000_000) * 15
+    input_cost = (input_tokens / 1_000_000) * INPUT_PRICE_PER_MILLION_TOKENS
+    output_cost = (output_tokens / 1_000_000) * OUTPUT_PRICE_PER_MILLION_TOKENS
     return input_cost + output_cost
 
 
 def generate_prompt(diff, guidelines, additional_info):
-    return f"""{anthropic.HUMAN_PROMPT} You are an AI assistant providing specific suggestions for code improvements. 
+    return f"""You are an AI assistant providing specific suggestions for code improvements.
     Analyze this code diff:
     {diff}
 
@@ -108,9 +103,7 @@ def generate_prompt(diff, guidelines, additional_info):
     - Provide the exact code snippet to be changed
     - Explain why the change improves the code
 
-    Do not comment on formatting or test coverage checks, which CI/CD will handle.
-
-    {anthropic.AI_PROMPT}"""
+    Do not comment on formatting or test coverage checks, which CI/CD will handle."""
 
 
 def main():
@@ -147,7 +140,7 @@ def main():
             st.session_state.prompt = prompt
 
             estimated_input_tokens = estimate_token_count(prompt)
-            estimated_output_tokens = 1_000  # Max tokens set in the API call
+            estimated_output_tokens = MAX_TOKENS  # Max tokens in the API call
             st.session_state.estimated_cost = estimate_cost(
                 estimated_input_tokens, estimated_output_tokens
             )
@@ -159,17 +152,19 @@ def main():
     button_text = "Analyze PR"
     if st.session_state.estimated_cost > 0:
         button_text += (
-            f" (costs up to {st.session_state.estimated_cost*100:.1f} cents)"
+            f" (estimated cost: {st.session_state.estimated_cost*100:.1f} cents)"
         )
 
     if st.button(button_text):
         if pr_url and "github.com/policyengine" in pr_url.lower():
             with st.spinner("Analyzing PR..."):
-                suggestions, _ = get_claude_suggestions(
+                suggestions, _, usage = get_claude_suggestions(
                     diff, guidelines, additional_info
                 )
 
-                if suggestions:
+                if usage is None:
+                    st.error(suggestions)
+                elif suggestions:
                     st.session_state.suggestions = suggestions
 
                     st.subheader("Improvement Suggestions:")
@@ -178,11 +173,10 @@ def main():
                     with st.expander("View Copyable Suggestions"):
                         st.code(suggestions, language="markdown")
 
-                    # Calculate and display actual token count and cost
-                    input_tokens = estimate_token_count(
-                        st.session_state.prompt
-                    )
-                    output_tokens = estimate_token_count(suggestions)
+                    # Display the billed token counts and cost; output
+                    # tokens include any thinking tokens.
+                    input_tokens = usage.input_tokens
+                    output_tokens = usage.output_tokens
                     actual_cost = estimate_cost(input_tokens, output_tokens)
 
                     st.info(
